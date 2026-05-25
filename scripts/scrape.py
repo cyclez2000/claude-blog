@@ -126,18 +126,27 @@ def parse_date(text: str) -> Optional[date]:
 def clean_text(text: str) -> str:
     """清理文本：去重空行、移除导航残留。"""
     lines = [l.strip() for l in text.split("\n")]
-    # 移除明显非内容的行
     skip_prefixes = (
-        "Skip to main content", "Skip to footer", "Contact sales",
-        "Try Claude", "Log in", "Home page", "Homepage",
+        "Skip to main content", "Skip to footer", "Skip to",
+        "Contact sales", "Try Claude", "Log in", "Home page", "Homepage",
         "Thank you!", "Oops!", "Get the developer newsletter",
         "© 2026", "Cookie settings",
+        "Explore here", "Subscribe",
+        "Anthropic", "Claude\n", "Products\n", "Features\n",
+        "Models\n", "Solutions\n", "Resources\n", "Company\n",
+        "Help and security", "Terms and policies",
+        "x.com", "LinkedIn", "YouTube", "Instagram",
+        "English (US)",
     )
     cleaned = []
+    skip_mode = False
     for line in lines:
         if not line:
             continue
-        if line.startswith(skip_prefixes):
+        if any(line.startswith(p) for p in skip_prefixes):
+            continue
+        # 跳过纯导航链接行（单行且很短）
+        if len(line) < 5 and not line[0].isalpha():
             continue
         cleaned.append(line)
     return "\n".join(cleaned)
@@ -228,7 +237,7 @@ async def fetch_article_http(url: str) -> Optional[str]:
 async def fetch_article_playwright(page, url: str) -> Optional[str]:
     """Playwright 获取文章全文（Webflow/Sanity CMS JS 渲染）。"""
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         await page.wait_for_timeout(2000)
     except Exception as e:
         print(f"    ⚠ Playwright goto {url}: {e}")
@@ -312,10 +321,10 @@ async def main():
         all_arts = sitemap_cache[ch_cfg["path_prefix"]]
         print(f"  Total in sitemap: {len(all_arts)}")
 
-        # 取最近 3 天（容错时区差异）
-        valid_dates = {TODAY, TODAY - timedelta(days=1), TODAY - timedelta(days=2)}
+        # 取最近 7 天（周末/假期容错）
+        valid_dates = {TODAY - timedelta(days=i) for i in range(7)}
         today_arts = [a for a in all_arts if a["lastmod"] and a["lastmod"] in valid_dates]
-        print(f"  Recent (≤3 days): {len(today_arts)}")
+        print(f"  Recent (≤7 days): {len(today_arts)}")
 
         if not today_arts:
             result["channels"][ch_id] = []
@@ -382,9 +391,9 @@ async def main():
                     result["channels"][ch_id] = []
                     continue
 
-                # 2) 逐篇抓取全文，按日期过滤
+                # 列表页已按时间倒序，取前 30 篇直接收
                 articles = []
-                for art in article_list[:60]:
+                for art in article_list[:30]:
                     slug = art["url"].rstrip("/").split("/")[-1]
                     print(f"  Fetching: {slug[:60]}")
                     content = await fetch_article_playwright(article_page, art["url"])
@@ -392,15 +401,6 @@ async def main():
                         continue
 
                     meta = extract_metadata(content)
-                    art_date_str = meta.get("date")
-                    if art_date_str:
-                        try:
-                            d = date.fromisoformat(art_date_str)
-                            if d < TODAY - timedelta(days=2):
-                                continue  # 跳过太旧的文章
-                        except ValueError:
-                            pass
-
                     articles.append({
                         "title": meta["title"] or art["title"] or slug.replace("-", " ").title(),
                         "url": art["url"],
